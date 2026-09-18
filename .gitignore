@@ -1,0 +1,13 @@
+# Everything generated lands in out/ (see sq.model.out): GIFs from view.py and
+# the study scripts, .npz trajectories from sq.verify_to and studies.reach.
+# All reproducible from the sources, 16 MB of them, and they churn every run.
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store

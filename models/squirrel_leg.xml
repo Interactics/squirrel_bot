@@ -1,0 +1,112 @@
+<mujoco model="squirrel_leg">
+  <!-- One squirrel hindlimb carrying a lumped torso, sagittal plane only.
+       Geometry matches squirrel_leg.urdf / squirrl_mechanism.m:
+         femur 45 / tibia 50 / metatarsus 35 / phalanges 18 mm
+       Zero pose = leg straight down, foot collinear with the shank.
+       Base is planar (slide x, slide z, pitch) - one leg cannot balance
+       out of plane and pretending otherwise just wastes solver time. -->
+
+  <compiler angle="degree" autolimits="true"/>
+
+  <!-- Joint ranges are anatomical estimates for a grey squirrel hindlimb, each
+       ~90-130 deg of travel, anchored so the plantigrade home pose sits inside
+       every one of them.  Zero is the leg straight down with the foot in line
+       with the shank, which is full pointe and NOT a posture the animal holds -
+       that is why the ankle range is far from zero.  These are estimates: tune
+       them against real kinematics before trusting a reach number.
+         hip    -50 ..  +55   (105 deg)      plantigrade home:  +10.8
+         knee    +5 .. +135   (130 deg)                         +45.5
+         ankle -160 ..  -55   (105 deg)                        -146.2
+         mtp    -70 ..  +20    (90 deg)                          +0.0 -->
+  <option timestep="2e-4" gravity="0 0 -9.81" integrator="implicitfast"/>
+
+  <default>
+    <joint type="hinge" axis="0 1 0"/>   <!-- no damping/armature: pinocchio does not import armature, and TO/WBC must see the same robot mujoco does -->
+    <geom type="capsule" rgba=".85 .82 .75 1" friction="0.9 0.005 0.0001"/>
+    <default class="foot">
+      <geom rgba=".76 .25 .05 1" solref="0.008 1"/>   <!-- soft pads -->
+    </default>
+    <position kp="15" kv="0.15"/>            <!-- no forcerange: actuators are unlimited -->
+  </default>
+
+  <visual><headlight diffuse=".6 .6 .6"/><global azimuth="90" elevation="-15"/></visual>
+
+  <worldbody>
+    <light pos="0 0 1" dir="0 0 -1" diffuse=".8 .8 .8"/>
+    <geom name="floor" type="plane" size="2 2 .05" rgba=".82 .80 .76 1"
+          friction="0.9 0.005 0.0001"/>
+
+    <!-- torso sits ON TOP of the hip; hip joint is at the torso frame origin.
+         ponytail: COM parked over the hip, not forward where a real squirrel
+         trunk sits. A real trunk is carried by the forelimbs and tail; with one
+         hindlimb a forward COM just tips over and tells you nothing about the
+         leg. Move the geom's pos x forward once the tail is in. -->
+    <body name="torso" pos="0 0 0.072">
+      <joint name="slide_x" type="slide" axis="1 0 0"/>
+      <joint name="slide_z" type="slide" axis="0 0 1"/>
+      <joint name="pitch"   type="hinge" axis="0 1 0"/>
+      <geom name="trunk" type="ellipsoid" pos="-0.015 0 0.035" size="0.045 0.028 0.030"
+            mass="0.350" rgba=".45 .40 .35 1"/>
+
+
+      <!-- TAIL:BEGIN -->
+      <!-- TAIL:END -->
+
+      <body name="femur">
+        <joint name="hip" range="-50 55"/>
+        <geom name="femur" fromto="0 0 0  0 0 -0.045" size="0.004" mass="0.0090"/>
+
+        <body name="tibia" pos="0 0 -0.045">
+          <joint name="knee" range="5 135"/>
+          <geom name="tibia" fromto="0 0 0  0 0 -0.050" size="0.004" mass="0.0070"/>
+
+          <!-- the ankle is the extra gear: plantigrade <-> digitigrade lives here -->
+          <body name="metatarsus" pos="0 0 -0.050">
+            <joint name="ankle" range="-160 -55"/>
+            <geom name="metatarsus" class="foot" fromto="0 0 0  0 0 -0.035" size="0.004"
+                  mass="0.0040"/>
+            <geom name="heel_pad" class="foot" type="sphere" pos="0 0 0" size="0.005"
+                  mass="0.0005"/>
+
+            <body name="phalanx" pos="0 0 -0.035">
+              <joint name="mtp" range="-70 20"/>
+              <!-- Kept collidable on purpose.  contype="0" would make the toe
+                   sphere the only toe contact, but pinocchio's MJCF parser drops
+                   a non-colliding geom's MASS as well - 1.5 g went missing and
+                   the two models stopped matching.  Instead the radius is well
+                   under the toe sphere's 4 mm, so the sphere is what touches. -->
+              <geom name="phalanx" class="foot" fromto="0 0 0  0 0 -0.018" size="0.0015"
+                    mass="0.0015"/>
+              <geom name="toe_pad" class="foot" type="sphere" pos="0 0 -0.018" size="0.004"
+                    mass="0.0005"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- The home pose: plantigrade, sole flat on the ground.  This is what the
+       animal stands in, and every default in the code points here. -->
+  <keyframe>
+    <key name="plantigrade" qpos="0 0.00494515 0 0 0.188496 0.794125 -2.55167 0"/>
+  </keyframe>
+
+  <actuator>
+    <position name="hip"   joint="hip"   ctrlrange="-69 92"/>
+    <position name="knee"  joint="knee"  ctrlrange="0 149"/>
+    <position name="ankle" joint="ankle" ctrlrange="-149 11"/>
+    <position name="mtp"   joint="mtp"   ctrlrange="-92 23"/>
+    <!-- TAILACT:BEGIN -->
+    <!-- TAILACT:END -->
+  </actuator>
+
+  <sensor>
+    <jointactuatorfrc name="tau_hip"   joint="hip"/>
+    <jointactuatorfrc name="tau_knee"  joint="knee"/>
+    <jointactuatorfrc name="tau_ankle" joint="ankle"/>
+    <jointactuatorfrc name="tau_mtp"   joint="mtp"/>
+    <!-- TAILSENS:BEGIN -->
+    <!-- TAILSENS:END -->
+  </sensor>
+</mujoco>
