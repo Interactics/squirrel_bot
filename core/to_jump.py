@@ -2,7 +2,7 @@
 
     python -m core.to_jump
 
-Direct collocation (trapezoidal) on the full planar dynamics, three phases with
+Direct transcription (semi-implicit Euler) on the full planar dynamics, three phases with
 free durations.  Contact schedule is fixed - stance, flight, stance - so no
 complementarity is needed.
 
@@ -32,6 +32,35 @@ RISE = 0.080                        # m of COM rise to ask for
 # optimiser jumps backwards, because the tail drags the COM 34 mm behind the hip
 # and pushing off a foot that sits in front of the COM throws you that way.
 REACH = 0.150                       # m of forward stride, foot to foot
+# Jerk penalty, off.  It was tried against the trapezoidal zig-zag and could not
+# remove it - the oscillation was forced by the constraints, and the jerk term
+# plateaued at ~1e7 whatever its weight.  The integrator change fixed it instead.
+# See formulation.md, changelog.
+W_JERK = 0.0
+
+# Objective: every term is a time integral of a quantity divided by a reference
+# scale, so the weights mean what they say.  They did not before: the "small"
+# regulariser 0.02*sum|a|^2 (unscaled, rad/s^2 in the hundreds) was ~3e4 against
+# an effort term of ~0.2 - the TO was minimising acceleration, not torque, and an
+# angular momentum term had no say at any weight.
+A_REF = 100.0                  # rad/s^2 (or m/s^2 on the base)
+TH_REF = np.deg2rad(10.0)      # body pitch
+L_REF = 5e-3                   # N m s, centroidal angular momentum about the COM (y)
+W_A = 1e-2                     # acceleration: a regulariser, not a goal
+W_TH = 0.1                     # keep the body roughly level
+# Angular momentum.  In flight L is conserved, so this is mostly a price on the
+# spin the body leaves the ground with - which the tail then has to cancel.
+W_L = 1.0
+
+# Leave the execution something to work with.  Each of these was found by running
+# the plan in MuJoCo and watching it fall.
+# Tail range the PLAN may use; the rest of the joint range (-150..60) is reserved
+# for attitude feedback.  Unrestricted, the optimiser parked the tail at 56-60 deg,
+# against its stop, and feedback could only push it one way.
+TAIL_PLAN = np.deg2rad([-110.0, 20.0])
+# Toe height margin mid-flight.  With none, a jump a little lower than planned
+# dragged the foot along the floor, and the ground spun the body up.
+FLIGHT_CLEAR = 0.010
 
 
 def make_funcs(model, toe_id, frames, pairs=()):
@@ -89,11 +118,21 @@ def make_funcs(model, toe_id, frames, pairs=()):
 
     clear = ca.Function("clear", [q], [ca.vertcat(*res)])
 
-    return dict(nq=nq, nv=nv, rnea=rnea, toe=toe, Jtoe=Jtoe, com=com, clear=clear)
+    d9 = cmodel.createData()
+    L = ca.Function("L", [q, v], [cpin.computeCentroidalMomentum(cmodel, d9, q, v).angular[1]])
+
+    d10 = cmodel.createData()
+    cpin.forwardKinematics(cmodel, d10, q, v, a)
+    cpin.updateFramePlacements(cmodel, d10)
+    toe_acc = ca.Function("toe_acc", [q, v, a], [cpin.getFrameClassicalAcceleration(
+        cmodel, d10, toe_id, pin.LOCAL_WORLD_ALIGNED).linear[[0, 2]]])
+
+    return dict(nq=nq, nv=nv, rnea=rnea, toe=toe, Jtoe=Jtoe, com=com, clear=clear, L=L,
+                toe_acc=toe_acc)
 
 
 def solve(q_start, rise=RISE, reach=REACH, warm=None, verbose=False, max_iter=4000,
-          pairs=()):
+          pairs=(), w_jerk=W_JERK, w_L=W_L, w_a=W_A, w_th=W_TH):
     model, toe_id, _, frames = load()
     F = make_funcs(model, toe_id, frames, pairs)
     nq, nv, nu = F["nq"], F["nv"], 5
@@ -130,11 +169,17 @@ def solve(q_start, rise=RISE, reach=REACH, warm=None, verbose=False, max_iter=40
         for j, lo, hi in _limits(model):
             opti.subject_to(opti.bounded(lo, Q[j, k], hi))
 
-        opti.subject_to(F["clear"](Q[:, k]) >= 0)
+        # With semi-implicit Euler and V[:, N] == 0, q[N] == q[N-1] exactly, so any
+        # position-level row at the last knot duplicates the one before it - the
+        # same rank deficiency that k == 0 once caused, now at the other end.
+        last = k == N
+        if not last:
+            opti.subject_to(F["clear"](Q[:, k]) >= 0)
 
         p = F["toe"](Q[:, k]) * 1e3
         if stance[k]:
-            opti.subject_to(p[1] == TOE_R * 1e3)                 # on the ground
+            if not last:
+                opti.subject_to(p[1] == TOE_R * 1e3)             # on the ground
             # Velocity-level too would be differentially redundant with the
             # position constraint at every knot, and rank-deficient constraint
             # Jacobians read to IPOPT as infeasibility.  Impose it once per
@@ -145,18 +190,32 @@ def solve(q_start, rise=RISE, reach=REACH, warm=None, verbose=False, max_iter=40
             if k == N_PUSH + N_FLY:
                 opti.subject_to(F["Jtoe"](Q[:, k]) @ V[:, k] * 1e3 == 0)
             opti.subject_to(Fc[1, k] >= 0)                       # push, never pull
+            # Complementarity at the last push knot: a contact that is pushing holds
+            # the toe still.  Without it the plan put its largest push (30.7 N) into
+            # the same interval in which the toe accelerated off the ground - which
+            # physics cannot do, so the real toe left 20-30 ms early.
+            if k == N_PUSH - 1:
+                opti.subject_to(F["toe_acc"](Q[:, k], V[:, k], A[:, k]) == 0)
             opti.subject_to(opti.bounded(-MU * Fc[1, k], Fc[0, k], MU * Fc[1, k]))
         else:
             opti.subject_to(Fc[:, k] == 0)
             opti.subject_to(p[1] >= TOE_R * 1e3)                 # stay above the floor
+            if N_PUSH + 2 <= k <= N_PUSH + N_FLY - 3:
+                opti.subject_to(p[1] >= (TOE_R + FLIGHT_CLEAR) * 1e3)
 
-    for k in range(N):                                           # trapezoidal
+    # Semi-implicit Euler, not trapezoidal.  Trapezoidal only pins a[k] + a[k+1],
+    # and in stance the toe velocity is ~0 at every knot, so consecutive toe
+    # accelerations must cancel.  The big toe acceleration that liftoff needs then
+    # echoed back through the whole push as a +-12 m/s^2 chain, and touchdown did
+    # the same forward through landing: torque zig-zagging 300 mN m knot to knot.
+    # Here each a[k] owns exactly one interval, so a liftoff spike stays one spike.
+    for k in range(N):
         h = step[k]
-        opti.subject_to(Q[:, k + 1] == Q[:, k] + 0.5 * h * (V[:, k] + V[:, k + 1]))
-        opti.subject_to(V[:, k + 1] == V[:, k] + 0.5 * h * (A[:, k] + A[:, k + 1]))
+        opti.subject_to(V[:, k + 1] == V[:, k] + h * A[:, k])
+        opti.subject_to(Q[:, k + 1] == Q[:, k] + h * V[:, k + 1])
 
     # the foot does not move within either stance phase
-    for a, b in ((0, N_PUSH - 1), (N_PUSH + N_FLY, N)):
+    for a, b in ((0, N_PUSH - 1), (N_PUSH + N_FLY, N - 1)):   # N duplicates N-1
         for k in range(a + 1, b + 1):
             opti.subject_to((F["toe"](Q[:, k])[0] - F["toe"](Q[:, a])[0]) * 1e3 == 0)
 
@@ -179,7 +238,10 @@ def solve(q_start, rise=RISE, reach=REACH, warm=None, verbose=False, max_iter=40
     # for an 80 mm rise bought 178 mm.
     lift = N_PUSH
     _, vcom = F["com"](Q[:, lift], V[:, lift])
-    opti.subject_to(vcom[2] == np.sqrt(2 * 9.81 * rise))
+    # Semi-implicit Euler under constant gravity puts the flight positions on the
+    # exact parabola launched with v - g h/2, not v.  Ask for THAT velocity, or
+    # an 80 mm request comes out as 74 mm.
+    opti.subject_to(vcom[2] - 9.81 * dt[1] / 2 == np.sqrt(2 * 9.81 * rise))
 
     # Where to land.  Without this the optimiser picks whatever is cheapest,
     # which turns out to be 54 mm BACKWARDS.  Measured foot-to-foot, so it is
@@ -187,8 +249,22 @@ def solve(q_start, rise=RISE, reach=REACH, warm=None, verbose=False, max_iter=40
     td = N_PUSH + N_FLY
     if reach is not None:
         opti.subject_to((F["toe"](Q[:, td])[0] - F["toe"](Q[:, 0])[0] - reach) * 1e3 == 0)
-    effort = sum(step[k] * ca.sumsqr(U[:, k]) for k in range(N))
-    opti.minimize(effort + 0.02 * ca.sumsqr(A) + 0.01 * ca.sumsqr(Q[2, :]))
+    # Sums run over ALL knots, k = 0..N.  a_N, tau_N and f_N move nothing (the
+    # integration stops at N-1), so if the cost leaves them out they are free -
+    # the first rescaled run came back with f_N = 121 kN.  The last knot reuses
+    # the last step length.
+    hk = lambda k: step[min(k, N - 1)]
+    effort = sum(hk(k) * ca.sumsqr(U[:, k] / TAU_MAX) for k in range(N + 1))
+    acc = sum(hk(k) * ca.sumsqr(A[:, k] / A_REF) for k in range(N + 1))
+    tilt = sum(hk(k) * (Q[2, k] / TH_REF) ** 2 for k in range(N + 1))
+    # sum h |jerk|^2 with jerk = (a[k+1] - a[k]) / h.  Skipped across liftoff and
+    # touchdown: contact switching on or off makes acceleration jump for real,
+    # and penalising that fights the physics instead of the artefact.
+    switch = {N_PUSH - 1, N_PUSH + N_FLY - 1}
+    jerk = sum(ca.sumsqr(A[:, k + 1] - A[:, k]) / step[k]
+               for k in range(N) if k not in switch)
+    ang = sum(hk(k) * (F["L"](Q[:, k], V[:, k]) / L_REF) ** 2 for k in range(N + 1))
+    opti.minimize(effort + w_a * acc + w_th * tilt + w_L * ang + w_jerk * jerk)
 
     if warm is None:
         opti.set_initial(Q, np.tile(q_start.reshape(-1, 1), N + 1))
@@ -234,7 +310,7 @@ def solve_reach(q_start, reach, warm, rise=RISE, n=4, pairs=()):
 
 
 def solve_homotopy(q_start, target=RISE, reach=REACH, pairs=(),
-                   steps=(0.02, 0.04, 0.06, None)):
+                   steps=(0.02, 0.04, 0.06, None), **kw):
     """Walk the jump height up, warm-starting each solve from the last.
 
     Cold-starting straight at the target just runs IPOPT out of iterations: the
@@ -242,7 +318,7 @@ def solve_homotopy(q_start, target=RISE, reach=REACH, pairs=(),
     warm = None
     for rise in steps:
         rise = target if rise is None else min(rise, target)
-        warm = solve(q_start, rise=rise, reach=reach, warm=warm, pairs=pairs)
+        warm = solve(q_start, rise=rise, reach=reach, warm=warm, pairs=pairs, **kw)
         print(f"  rise {rise*1000:4.0f} mm  ok   "
               f"peak |tau| {np.abs(warm['tau']).max()*1e3:5.0f} mNm   "
               f"push {warm['dt'][0]*N_PUSH*1000:4.0f} ms   "
@@ -286,6 +362,8 @@ def _limits(model):
     out = []
     for j in range(NB, model.nq):
         lo, hi = model.lowerPositionLimit[j], model.upperPositionLimit[j]
+        if j == NB:                                   # the tail: keep headroom
+            lo, hi = max(lo, TAIL_PLAN[0]), min(hi, TAIL_PLAN[1])
         if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
             out.append((j, lo, hi))
     return out

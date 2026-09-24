@@ -7,9 +7,14 @@ while it assembles the Hessian.  In practice only two or three pairs ever bind.
 So: solve, ask MuJoCo's own narrowphase what actually overlapped, add constraints
 for exactly those, solve again.  MuJoCo is the referee, not my point sampling.
 """
+import os
+import time
+
 import numpy as np
 import mujoco
+import pinocchio as pin
 
+from core.model import Q_COLS, TAU_COLS, V_COLS, out, run_dir, save_table
 from core.model_pin import GEOM_POINTS, load
 from core.to_jump import N_FLY, N_LAND, N_PUSH, audit, solve_homotopy, start_pose
 
@@ -51,6 +56,22 @@ def to_pairs(hits):
     return out, unmapped
 
 
+def save_plan(r, t, folder):
+    """The plan as a table: time, phase, q, v, tau, contact force, and centroidal
+    angular momentum about the COM (y), one row per knot."""
+    model, _, _, _ = load()
+    data = model.createData()
+    L = [pin.computeCentroidalMomentum(model, data, r["q"][:, k], r["v"][:, k]).angular[1]
+         for k in range(r["q"].shape[1])]
+    phase = np.where(r["stance"], np.where(np.arange(len(t)) < N_PUSH, 0, 2), 1)
+    cols = {"t_s": t, "phase_0push_1flight_2land": phase}
+    cols.update({n: r["q"][i] for i, n in enumerate(Q_COLS)})
+    cols.update({n: r["v"][i] for i, n in enumerate(V_COLS)})
+    cols.update({n: r["tau"][i] for i, n in enumerate(TAU_COLS)})
+    cols.update({"fx_N": r["f"][0], "fz_N": r["f"][1], "L_Nms": L})
+    return save_table(os.path.join(folder, "plan"), cols)
+
+
 def main():
     _, _, xml, _ = load()
     q0 = start_pose()
@@ -83,9 +104,11 @@ def main():
           f"{np.abs(r['tau']).max()*1e3:.0f} mNm   fz {r['f'][1].max():.1f} N")
 
     t = np.concatenate([[0], np.cumsum(np.repeat(r["dt"], [N_PUSH, N_FLY, N_LAND]))])
+    stamp = time.strftime("%Y%m%d-%H%M%S")
     np.savez(out("to_jump.npz"), q=r["q"], v=r["v"], a=r["a"], tau=r["tau"], f=r["f"],
-             dt=r["dt"], stance=r["stance"], t=t)
+             dt=r["dt"], stance=r["stance"], t=t, run=stamp)
     print("wrote", out("to_jump.npz"))
+    print("wrote", save_plan(r, t, run_dir(stamp)) + ".csv")
     assert not penetrations(xml, r["q"]), "the plan must not pass through anything"
     return r
 

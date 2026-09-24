@@ -21,6 +21,33 @@ def out(name):
     os.makedirs(OUT, exist_ok=True)
     return os.path.join(OUT, name)
 
+
+# Column names for q / v, in model order, with units in the name so a CSV read
+# cold is unambiguous.
+Q_COLS = ("x_m", "z_m", "pitch_rad", "tail_rad", "hip_rad", "knee_rad", "ankle_rad", "mtp_rad")
+V_COLS = ("vx_mps", "vz_mps", "wpitch_radps", "wtail_radps", "whip_radps",
+          "wknee_radps", "wankle_radps", "wmtp_radps")
+TAU_COLS = ("tau_tail_Nm", "tau_hip_Nm", "tau_knee_Nm", "tau_ankle_Nm", "tau_mtp_Nm")
+
+
+def run_dir(stamp):
+    """out/runs/<stamp>/ - one folder per TO run.  The physics of that plan is
+    written into the same folder, so a plan and its execution stay paired."""
+    path = os.path.join(OUT, "runs", stamp)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def save_table(path, cols):
+    """Write the same columns to <path>.csv (to read) and <path>.npz (to load).
+    `cols` is an ordered dict of 1-D arrays of equal length."""
+    names = list(cols)
+    data = np.column_stack([np.asarray(cols[n], float) for n in names])
+    np.savetxt(path + ".csv", data, delimiter=",", header=",".join(names),
+               comments="", fmt="%.6g")
+    np.savez(path + ".npz", **{n: np.asarray(cols[n], float) for n in names})
+    return path
+
 LEG = ("hip", "knee", "ankle", "mtp")
 PADS = ("heel_pad", "toe_pad", "metatarsus", "phalanx")
 # The XML ships with empty tail slots; this is the tail the model gets by default.
@@ -58,7 +85,7 @@ def build(n=1, mass=0.025, tip=0.0, torque=None):
             bodies.append(f'{pad}  <geom name="tip" type="sphere" pos="-{seg:.4f} 0 0" '
                           f'size="0.016" mass="{tip:.6f}" rgba=".30 .30 .34 1"/>')
         lim = f' forcerange="-{torque} {torque}"' if torque else ""
-        acts.append(f'    <position name="{nm}" joint="{nm}" ctrlrange="-150 60"{lim}/>')
+        acts.append(f'    <position name="{nm}" joint="{nm}"{lim}/>')
         sens.append(f'    <jointactuatorfrc name="tau_{nm}" joint="{nm}"/>')
     for i in range(n - 1, -1, -1):
         bodies.append(ind + "  " * i + "</body>")

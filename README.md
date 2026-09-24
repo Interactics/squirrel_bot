@@ -7,10 +7,11 @@ trajectory is real.
 
 ![jump and landing](docs/jump.gif)
 
-Crouch, push 114 ms, fly 260 ms, land - 80 mm of COM rise, landing foot placed
-150 mm ahead of the take-off foot to within 0.01 mm, peak joint torque 903 mN m.
-This is the plan, played back kinematically; tracking it in closed loop is the
-whole-body controller's job and is not written yet.
+Crouch, push, fly, land - 80 mm of COM rise, landing foot placed 150 mm ahead of
+the take-off foot. This is the plan, played back kinematically. In MuJoCo physics,
+feedforward torque plus joint PD tracks the push to within 3 deg of body pitch, but
+leaves 9 deg at liftoff and the body tumbles in flight: nothing feeds back body
+attitude yet (`python -m studies.track`).
 
 ```
 models/squirrel_leg.xml   the model.  Hand-written, with marker slots the tail is
@@ -42,69 +43,17 @@ macOS live viewer needs `mjpython`, which needs `otool`:
 PATH="/Library/Developer/CommandLineTools/usr/bin:$PATH" mjpython -m core.view live plantigrade
 ```
 
+## The robot
+
+Every physical spec — masses, inertias, joint ranges, tail, contact, actuators — and
+how it compares with a real grey squirrel: **[model.md](model.md)**.
+
 ## The problem
 
-Direct collocation on the full planar dynamics. Three phases with free durations
-and a fixed contact schedule — stance $\mathcal{C}$, flight $\mathcal{F}$, stance —
-so no complementarity is needed. $N+1 = 53$ knots.
-
-$q_k \in \mathbb{R}^8$ is the floating base $(x, z, \theta)$ followed by the tail,
-hip, knee, ankle and MTP angles. Only the last five are actuated, which
-$S \in \mathbb{R}^{5\times 8}$ selects — the three base rows carry no torque and
-must be satisfied by contact force alone. That is the underactuation.
-
-Minimise effort, with small regularisers on acceleration and body pitch:
-
-$$\min_{q,\,v,\,a,\,\tau,\,f,\,\Delta t}\; \sum_k h_k \lVert \tau_k \rVert^2 \;+\; 0.02 \sum_k \lVert a_k \rVert^2 \;+\; 0.01 \sum_k \theta_k^2$$
-
-Full rigid-body dynamics and trapezoidal collocation, at every knot:
-
-$$M(q_k)\,a_k + b(q_k, v_k) = S^{\top}\tau_k + J(q_k)^{\top} f_k$$
-
-$$q_{k+1} = q_k + \tfrac{h_k}{2}(v_k + v_{k+1}), \qquad v_{k+1} = v_k + \tfrac{h_k}{2}(a_k + a_{k+1})$$
-
-In stance the toe stays put and the ground may only push, inside the friction cone:
-
-$$p_z(q_k) = r, \quad p_x(q_k) = \text{const}, \quad f_{k,z} \ge 0, \quad \lvert f_{k,x} \rvert \le \mu f_{k,z} \qquad k \in \mathcal{C}$$
-
-In flight there is no contact force, and nothing may go under the floor:
-
-$$f_k = 0, \qquad p_z(q_k) \ge r \qquad k \in \mathcal{F}$$
-
-Limits, and clearance $c(q) \ge 0$ — 17 rows of floor and trunk, plus whatever
-segment pairs MuJoCo reports as overlapping:
-
-$$\lvert \tau_k \rvert \le \bar\tau, \quad \lvert v_k \rvert \le \bar v, \quad q^- \le q_k \le q^+, \quad c(q_k) \ge 0$$
-
-Start level and at rest; land level, at rest, and with the foot already matching
-the ground so there is no impact to model:
-
-$$v_0 = v_N = 0, \quad \theta_0 = \theta_N = 0, \quad J(q_{\mathrm{td}})\,v_{\mathrm{td}} = 0$$
-
-And the two things actually being asked for — jump this high, land there:
-
-$$\dot{c}_z(q_{\mathrm{lo}}, v_{\mathrm{lo}}) = \sqrt{2 g\, \Delta h}, \qquad p_x(q_{\mathrm{td}}) - p_x(q_0) = d$$
-
-$p(q)$ is the toe-sphere centre and $r$ its radius, so $p_z = r$ is exact for a
-sphere on a plane. $c_z$ is the centre of mass height. $\mathrm{lo}$ is the **first
-flight** knot, not the last stance knot: trapezoidal integration keeps adding ground
-reaction through $a_k$ at the last stance knot, so constraining liftoff velocity
-there asks for 80 mm of rise and delivers 178 mm.
-
-| | | |
-|---|---|---|
-| $\bar\tau$ | 1.5 N·m | generous, but finite — unbounded torque lets the optimiser mine integration error instead of the robot |
-| $\mu$ | 0.9 | matches the MJCF |
-| $r$ | 4 mm | toe sphere radius |
-| $\Delta h$, $d$ | 80 mm, 150 mm | the two things actually being asked for |
-| $h_k$ | 2–10 / 4–14 / 2–10 ms | stance steps stay short enough that trapezoidal integration is honest |
-
-**Where to land is a constraint, not a cost.** Height, landing spot and landing
-attitude are all equalities; the objective only buys them cheaply. That is why the
-landing error is 0.01 mm rather than "close" — and why an unreachable target fails
-outright instead of degrading gracefully. Maximising height *in the objective*,
-with no ceiling, produced a 5.5 m jump on 750 N of ground reaction: integration
-error, not a squirrel.
+The full optimal control problem — model, discretisation, objective, every
+constraint, how it is solved, current numbers and a changelog of what changed
+mathematically — lives in **[formulation.md](formulation.md)**, kept in step with
+the code.
 
 ## Three layers of checking
 

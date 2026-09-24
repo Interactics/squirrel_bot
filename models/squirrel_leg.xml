@@ -93,10 +93,10 @@
   </keyframe>
 
   <actuator>
-    <position name="hip"   joint="hip"   ctrlrange="-69 92"/>
-    <position name="knee"  joint="knee"  ctrlrange="0 149"/>
-    <position name="ankle" joint="ankle" ctrlrange="-149 11"/>
-    <position name="mtp"   joint="mtp"   ctrlrange="-92 23"/>
+    <position name="hip"   joint="hip"/>
+    <position name="knee"  joint="knee"/>
+    <position name="ankle" joint="ankle"/>
+    <position name="mtp"   joint="mtp"/>
     <!-- TAILACT:BEGIN -->
     <!-- TAILACT:END -->
   </actuator>

@@ -9,5 +9,8 @@ __pycache__/
 .venv/
 venv/
 
+# MuJoCo writes this next to wherever it was run when the sim goes unstable
+MUJOCO_LOG.TXT
+
 # macOS
 .DS_Store
